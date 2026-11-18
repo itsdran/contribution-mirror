@@ -1,0 +1,66 @@
+name: mirror contributions
+
+# This file and the script have to live on main: GitHub only ever fires
+# schedule triggers from the default branch.
+on:
+  schedule:
+    # 21:00 UTC = 05:00 Asia/Manila. The script never mirrors the current UTC
+    # day, since that day is still accumulating on both accounts and would be
+    # frozen at a partial count, so each run covers through the previous day.
+    # Scheduled runs are best-effort and GitHub delays them under load; that is
+    # harmless here because the next run simply catches up.
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+
+# Only the push needs write access, and it uses the built-in token. No PAT is
+# stored anywhere: both graphs are read by account name through the public
+# user() API, so the token merely authenticates the read.
+permissions:
+  contents: write
+
+# Two runs must never build on the same published tip at once.
+concurrency:
+  group: mirror-contributions
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          # Mandatory. The script reads the published tip and appends to it; a
+          # shallow clone would hide that history, making it rebuild from
+          # scratch and orphan every commit already credited to the graph.
+          fetch-depth: 0
+
+      - name: Write .env
+        env:
+          # github.token normally suffices, since the only read is public user
+          # data. If it turns out not to be accepted for that GraphQL query,
+          # add a repo secret MIRROR_API_TOKEN holding any read-only PAT and
+          # this picks it up with no edit required.
+          API_TOKEN: ${{ secrets.MIRROR_API_TOKEN || github.token }}
+        run: |
+          umask 077
+          {
+            echo "API_TOKEN=$API_TOKEN"
+            echo "WORK_LOGIN=dran-slv"
+            echo "DEST_LOGIN=itsdran"
+            echo "PERSONAL_NAME=Dran"
+            echo "PERSONAL_EMAIL=dranoelflores@gmail.com"
+            echo "YEARS=$(date -u -d 'last year' +%Y),$(date -u +%Y)"
+            echo "COMMITS_CAP=20"
+          } > .env
+
+      - name: Mirror
+        run: python3 contribution-mirror.py --apply
+
+      - name: Push
+        # Deliberately not --force. A rejection means the rebuild diverged from
+        # what is published, and forcing would orphan commits -- which GitHub
+        # goes on crediting forever, permanently inflating the graph. A failed
+        # push is the alarm, not a problem to work around.
+        run: git push origin HEAD:refs/heads/main
